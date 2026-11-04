@@ -1,7 +1,8 @@
 require("dotenv").config();
 const {
   Client, GatewayIntentBits, AuditLogEvent, REST, Routes,
-  SlashCommandBuilder, PermissionFlagsBits, ChannelType
+  SlashCommandBuilder, PermissionFlagsBits, ChannelType,
+  EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle
 } = require("discord.js");
 
 const client = new Client({
@@ -69,10 +70,76 @@ client.on("guildMemberAdd", async member => {
   if (executor) await flag(member.guild, executor, `Added bot: ${member.user.tag}`);
 });
 
+function getTemplateCode(input) {
+  const value = input.trim();
+  const match = value.match(/(?:discord\.new\/|discord\.com\/template\/)([a-zA-Z0-9-]+)/i);
+  if (match) return match[1];
+  if (/^[a-zA-Z0-9-]{5,100}$/.test(value)) return value;
+  return null;
+}
+function channelType(type) {
+  const supported = new Set([
+    ChannelType.GuildText, ChannelType.GuildVoice, ChannelType.GuildCategory,
+    ChannelType.GuildAnnouncement, ChannelType.GuildStageVoice,
+    ChannelType.GuildForum, ChannelType.GuildMedia
+  ]);
+  return supported.has(type) ? type : null;
+}
+function previewChannel(channel) {
+  const prefix = channel.type === ChannelType.GuildCategory ? "📁" :
+    channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice ? "🔊" :
+    channel.type === ChannelType.GuildForum || channel.type === ChannelType.GuildMedia ? "🗂️" : "#";
+  return `${prefix} ${channel.name}`;
+}
+async function applyTemplate(guild, templateChannels) {
+  const valid = templateChannels
+    .filter(c => channelType(c.type) !== null)
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const categories = new Map();
+  let created = 0;
+  let failed = 0;
+
+  for (const source of valid.filter(c => c.type === ChannelType.GuildCategory)) {
+    try {
+      const category = await guild.channels.create({
+        name: source.name,
+        type: ChannelType.GuildCategory,
+        reason: "Apply approved Discord server template layout"
+      });
+      categories.set(source.id, category.id);
+      created++;
+    } catch { failed++; }
+  }
+
+  for (const source of valid.filter(c => c.type !== ChannelType.GuildCategory)) {
+    const options = {
+      name: source.name,
+      type: channelType(source.type),
+      reason: "Apply approved Discord server template layout"
+    };
+    const parentId = source.parent_id || source.parentId;
+    if (parentId && categories.has(parentId)) options.parent = categories.get(parentId);
+    const topic = source.topic;
+    if (topic && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(options.type)) options.topic = topic;
+    if (typeof source.nsfw === "boolean" && [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia].includes(options.type)) options.nsfw = source.nsfw;
+    const slowmode = source.rate_limit_per_user ?? source.rateLimitPerUser;
+    if (Number.isInteger(slowmode) && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(options.type)) options.rateLimitPerUser = slowmode;
+    if (Number.isInteger(source.bitrate) && [ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(options.type)) options.bitrate = source.bitrate;
+    if (Number.isInteger(source.user_limit) && options.type === ChannelType.GuildVoice) options.userLimit = source.user_limit;
+    try {
+      await guild.channels.create(options);
+      created++;
+    } catch { failed++; }
+  }
+  return { created, failed, skipped: templateChannels.length - valid.length };
+}
+
 const commands = [
   new SlashCommandBuilder().setName("antinuke-status").setDescription("Show antinuke protection status"),
   new SlashCommandBuilder().setName("deletechannels").setDescription("Owner-only channel cleanup")
-    .addStringOption(o => o.setName("confirm").setDescription('Type DELETE CHANNELS to confirm').setRequired(true))
+    .addStringOption(o => o.setName("confirm").setDescription('Type DELETE CHANNELS to confirm').setRequired(true)),
+  new SlashCommandBuilder().setName("template").setDescription("Preview and apply a Discord server template channel layout")
+    .addStringOption(o => o.setName("link").setDescription("Discord server template link or template code").setRequired(true))
 ].map(c => c.toJSON());
 
 client.once("ready", async () => {
@@ -84,6 +151,26 @@ client.once("ready", async () => {
   }
 });
 client.on("interactionCreate", async interaction => {
+  if (interaction.isButton() && interaction.customId.startsWith("template:")) {
+    const [, action, ownerId] = interaction.customId.split(":");
+    if (interaction.user.id !== ownerId) {
+      return interaction.reply({ ephemeral: true, content: "Only the person who started this preview can confirm it." });
+    }
+    const pending = client.templatePreviews?.get(ownerId);
+    if (!pending) return interaction.update({ content: "This template preview expired. Run /template again.", embeds: [], components: [] });
+    client.templatePreviews.delete(ownerId);
+    if (action === "cancel") {
+      return interaction.update({ content: "Template cancelled. No channels were created.", embeds: [], components: [] });
+    }
+    await interaction.update({ content: "Applying the approved channel layout…", embeds: [], components: [] });
+    const result = await applyTemplate(interaction.guild, pending.channels);
+    await interaction.editReply({
+      content: `Template finished. Created **${result.created}** channels/categories. Failed: **${result.failed}**. Unsupported types skipped: **${result.skipped}**. Existing channels were not changed or deleted.`
+    });
+    await log(interaction.guild, `Template layout applied by <@${ownerId}>. Created ${result.created}; failed ${result.failed}; skipped ${result.skipped}.`);
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === "antinuke-status") {
     return interaction.reply({ ephemeral: true, content: "🛡️ Antinuke monitoring is online. Alerts are sent to the configured security log channel." });
@@ -103,6 +190,62 @@ client.on("interactionCreate", async interaction => {
     const channels = [...guild.channels.cache.values()].filter(c => c.id !== process.env.LOG_CHANNEL_ID);
     for (const channel of channels) await channel.delete("Owner-confirmed channel cleanup").catch(() => {});
     await log(guild, `Owner <@${interaction.user.id}> ran channel cleanup. Attempted ${channels.length} deletions.`);
+    return;
+  }
+
+  if (interaction.commandName === "template") {
+    if (!interaction.guild) return interaction.reply({ ephemeral: true, content: "Use this command inside a server." });
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
+      return interaction.reply({ ephemeral: true, content: "You need Manage Channels permission to use this command." });
+    }
+    const me = interaction.guild.members.me;
+    if (!me?.permissions.has(PermissionFlagsBits.ManageChannels)) {
+      return interaction.reply({ ephemeral: true, content: "I need the Manage Channels permission to create the template layout." });
+    }
+    const code = getTemplateCode(interaction.options.getString("link", true));
+    if (!code) return interaction.reply({ ephemeral: true, content: "That doesn't look like a valid Discord template link or code." });
+    await interaction.deferReply({ ephemeral: true });
+    let template;
+    try {
+      const response = await fetch(`https://discord.com/api/v10/guilds/templates/${encodeURIComponent(code)}`);
+      if (!response.ok) throw new Error(`Template lookup returned HTTP ${response.status}`);
+      template = await response.json();
+    } catch (error) {
+      return interaction.editReply("I couldn't load that template. Check the link and make sure the template is public and valid.");
+    }
+    const source = template.serialized_source_guild || template.serializedSourceGuild;
+    const channels = source?.channels;
+    if (!Array.isArray(channels) || channels.length === 0) {
+      return interaction.editReply("That template has no readable channel layout.");
+    }
+    const supported = channels.filter(c => channelType(c.type) !== null);
+    const categories = supported.filter(c => c.type === ChannelType.GuildCategory);
+    const others = supported.filter(c => c.type !== ChannelType.GuildCategory);
+    const preview = supported.slice(0, 35).map(previewChannel).join("\n");
+    const embed = new EmbedBuilder()
+      .setColor(0xD71920)
+      .setTitle(`Template preview: ${template.name || "Discord server"}`)
+      .setDescription(`${preview}${supported.length > 35 ? `\n…and ${supported.length - 35} more` : ""}`)
+      .addFields(
+        { name: "Categories", value: String(categories.length), inline: true },
+        { name: "Other channels", value: String(others.length), inline: true },
+        { name: "Total to create", value: String(supported.length), inline: true }
+      )
+      .setFooter({ text: "Only channel layout is copied. Roles, permissions and existing channels are not changed." });
+    client.templatePreviews ||= new Map();
+    client.templatePreviews.set(interaction.user.id, { channels });
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`template:confirm:${interaction.user.id}`).setLabel("Create channels").setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`template:cancel:${interaction.user.id}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary)
+    );
+    const message = await interaction.editReply({ embeds: [embed], components: [row] });
+    const collector = message.createMessageComponentCollector({ time: 60_000, max: 1 });
+    collector.on("end", collected => {
+      if (collected.size === 0) {
+        client.templatePreviews?.delete(interaction.user.id);
+        interaction.editReply({ content: "Template preview expired. No channels were created.", embeds: [], components: [] }).catch(() => {});
+      }
+    });
   }
 });
 client.login(process.env.DISCORD_TOKEN);
