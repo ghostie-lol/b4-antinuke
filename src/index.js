@@ -91,7 +91,7 @@ function previewChannel(channel) {
     channel.type === ChannelType.GuildForum || channel.type === ChannelType.GuildMedia ? "🗂️" : "#";
   return `${prefix} ${channel.name}`;
 }
-function templateOverwrites(sourceChannel, sourceGuildId, targetGuild) {
+async function templateOverwrites(sourceChannel, sourceGuildId, targetGuild) {
   const overwrites = [];
   for (const overwrite of sourceChannel.permission_overwrites || sourceChannel.permissionOverwrites || []) {
     const id = String(overwrite.id);
@@ -131,7 +131,7 @@ async function applyTemplate(guild, templateSource) {
       name: source.name,
       type,
       reason: "Apply approved Discord server template without copying roles",
-      permissionOverwrites: templateOverwrites(source, templateSource.id, guild)
+      permissionOverwrites: await templateOverwrites(source, templateSource.id, guild)
     };
     const parentId = source.parent_id || source.parentId;
     if (parentId && categories.has(parentId)) options.parent = categories.get(parentId);
