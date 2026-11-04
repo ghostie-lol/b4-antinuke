@@ -277,8 +277,10 @@ client.once("ready", async () => {
   }
   if (process.env.GUILD_ID && process.env.CLIENT_ID) {
     const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+    // This app uses guild-scoped commands only. Remove stale global commands such as /lyrics.
+    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: [] });
     await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), { body: commands });
-    console.log("Registered guild slash commands");
+    console.log("Cleared global commands and registered guild slash commands");
   }
 });
 client.on("interactionCreate", async interaction => {
