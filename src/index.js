@@ -360,7 +360,10 @@ client.on("interactionCreate", async interaction => {
       .addFields(
         { name: "Categories", value: String(categories.length), inline: true },
         { name: "Other channels", value: String(others.length), inline: true },
-        { name: "Total to create", value: String(supported.length), inline: true },\n        { name: "Role copying", value: "Disabled", inline: true },\n        { name: "Server settings", value: "Included where supported", inline: true },\n        { name: "Permission overwrites", value: "Compatible @everyone and existing-member rules", inline: true }
+        { name: "Total to create", value: String(supported.length), inline: true },
+        { name: "Role copying", value: "Disabled", inline: true },
+        { name: "Server settings", value: "Included where supported", inline: true },
+        { name: "Permission overwrites", value: "Compatible @everyone and existing-member rules", inline: true }
       )
       .setFooter({ text: "Copies supported server settings, channel layout and compatible channel permissions. Roles are never copied; existing channels are not deleted." });
     client.templatePreviews ||= new Map();
