@@ -48,6 +48,10 @@ async function flag(guild, user, reason) {
   }
 }
 
+client.on("channelCreate", async channel => {
+  await lockExternalAppsAndActivities(channel.guild, channel);
+});
+
 client.on("channelDelete", async channel => {
   const executor = await findExecutor(channel.guild, AuditLogEvent.ChannelDelete, channel.id);
   await flag(channel.guild, executor, `Deleted channel: ${channel.name}`);
@@ -115,6 +119,54 @@ async function templateOverwrites(sourceChannel, sourceGuildId, targetGuild) {
   }
   return overwrites;
 }
+async function lockExternalAppsAndActivities(guild, onlyChannel = null) {
+  const me = guild.members.me;
+  if (!me?.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    await log(guild, "⚠️ App lockdown could not be applied: the bot needs Manage Roles to manage channel permission overwrites.");
+    return { updated: 0, failed: 1 };
+  }
+
+  await guild.roles.fetch().catch(() => {});
+  const roleTargets = [...guild.roles.cache.values()]
+    .filter(role => role.id !== guild.id && (
+      role.permissions.has(PermissionFlagsBits.UseExternalApps) ||
+      role.permissions.has(PermissionFlagsBits.UseEmbeddedActivities)
+    ))
+    .map(role => role.id);
+
+  const channels = onlyChannel
+    ? [onlyChannel]
+    : [...(await guild.channels.fetch()).values()].filter(Boolean);
+  let updated = 0;
+  let failed = 0;
+
+  for (const channel of channels) {
+    if (!channel?.permissionOverwrites) continue;
+    const targets = new Set([
+      guild.roles.everyone.id,
+      ...roleTargets,
+      ...channel.permissionOverwrites.cache.keys()
+    ]);
+
+    for (const targetId of targets) {
+      try {
+        await channel.permissionOverwrites.edit(targetId, {
+          UseExternalApps: false,
+          UseEmbeddedActivities: false
+        }, { reason: "B4 Antinuke: allow server-installed apps only and disable Activities" });
+        updated++;
+      } catch {
+        failed++;
+      }
+    }
+  }
+
+  if (!onlyChannel) {
+    await log(guild, `🛡️ App lockdown sweep finished. Updated ${updated} channel permission targets; failed: ${failed}. External app public replies and Activities are denied where the bot could update permissions. Server-installed app commands remain allowed.`);
+  }
+  return { updated, failed };
+}
+
 async function applyTemplate(guild, templateSource) {
   const templateChannels = templateSource.channels || [];
   const valid = templateChannels
@@ -219,6 +271,10 @@ const commands = [
 
 client.once("ready", async () => {
   console.log(`Ready as ${client.user.tag}`);
+  if (process.env.GUILD_ID) {
+    const guild = await client.guilds.fetch(process.env.GUILD_ID).catch(() => null);
+    if (guild) await lockExternalAppsAndActivities(await guild.fetch());
+  }
   if (process.env.GUILD_ID && process.env.CLIENT_ID) {
     const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
     await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), { body: commands });
