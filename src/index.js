@@ -91,47 +91,122 @@ function previewChannel(channel) {
     channel.type === ChannelType.GuildForum || channel.type === ChannelType.GuildMedia ? "🗂️" : "#";
   return `${prefix} ${channel.name}`;
 }
-async function applyTemplate(guild, templateChannels) {
+function templateOverwrites(sourceChannel, sourceGuildId, targetGuild) {
+  const overwrites = [];
+  for (const overwrite of sourceChannel.permission_overwrites || sourceChannel.permissionOverwrites || []) {
+    const id = String(overwrite.id);
+    const type = Number(overwrite.type);
+    // Role overwrites are intentionally excluded. Only @everyone and existing members can map safely.
+    if (type === 0 && id === String(sourceGuildId)) {
+      overwrites.push({
+        id: targetGuild.id,
+        type: 0,
+        allow: String(overwrite.allow ?? "0"),
+        deny: String(overwrite.deny ?? "0")
+      });
+    } else if (type === 1 && targetGuild.members.cache.has(id)) {
+      overwrites.push({
+        id,
+        type: 1,
+        allow: String(overwrite.allow ?? "0"),
+        deny: String(overwrite.deny ?? "0")
+      });
+    }
+  }
+  return overwrites;
+}
+async function applyTemplate(guild, templateSource) {
+  const templateChannels = templateSource.channels || [];
   const valid = templateChannels
     .filter(c => channelType(c.type) !== null)
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const categories = new Map();
+  const channelIds = new Map();
   let created = 0;
   let failed = 0;
 
-  for (const source of valid.filter(c => c.type === ChannelType.GuildCategory)) {
-    try {
-      const category = await guild.channels.create({
-        name: source.name,
-        type: ChannelType.GuildCategory,
-        reason: "Apply approved Discord server template layout"
-      });
-      categories.set(source.id, category.id);
-      created++;
-    } catch { failed++; }
-  }
-
-  for (const source of valid.filter(c => c.type !== ChannelType.GuildCategory)) {
+  async function createOne(source) {
+    const type = channelType(source.type);
     const options = {
       name: source.name,
-      type: channelType(source.type),
-      reason: "Apply approved Discord server template layout"
+      type,
+      reason: "Apply approved Discord server template without copying roles",
+      permissionOverwrites: templateOverwrites(source, templateSource.id, guild)
     };
     const parentId = source.parent_id || source.parentId;
     if (parentId && categories.has(parentId)) options.parent = categories.get(parentId);
-    const topic = source.topic;
-    if (topic && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(options.type)) options.topic = topic;
-    if (typeof source.nsfw === "boolean" && [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia].includes(options.type)) options.nsfw = source.nsfw;
+    if (source.topic && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(type)) options.topic = source.topic;
+    if (typeof source.nsfw === "boolean" && [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia].includes(type)) options.nsfw = source.nsfw;
     const slowmode = source.rate_limit_per_user ?? source.rateLimitPerUser;
-    if (Number.isInteger(slowmode) && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(options.type)) options.rateLimitPerUser = slowmode;
-    if (Number.isInteger(source.bitrate) && [ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(options.type)) options.bitrate = source.bitrate;
-    if (Number.isInteger(source.user_limit) && options.type === ChannelType.GuildVoice) options.userLimit = source.user_limit;
-    try {
-      await guild.channels.create(options);
-      created++;
-    } catch { failed++; }
+    if (Number.isInteger(slowmode) && [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildMedia].includes(type)) options.rateLimitPerUser = slowmode;
+    const archive = source.default_auto_archive_duration ?? source.defaultAutoArchiveDuration;
+    if (Number.isInteger(archive)) options.defaultAutoArchiveDuration = archive;
+    const bitrate = source.bitrate;
+    if (Number.isInteger(bitrate) && [ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(type)) options.bitrate = bitrate;
+    const userLimit = source.user_limit ?? source.userLimit;
+    if (Number.isInteger(userLimit) && type === ChannelType.GuildVoice) options.userLimit = userLimit;
+    if (source.rtc_region || source.rtcRegion) options.rtcRegion = source.rtc_region || source.rtcRegion;
+    if (source.video_quality_mode || source.videoQualityMode) options.videoQualityMode = source.video_quality_mode || source.videoQualityMode;
+    if (Number.isInteger(source.rate_limit_per_user) && type === ChannelType.GuildText) options.rateLimitPerUser = source.rate_limit_per_user;
+    const createdChannel = await guild.channels.create(options);
+    channelIds.set(source.id, createdChannel.id);
+    if (type === ChannelType.GuildCategory) categories.set(source.id, createdChannel.id);
+    created++;
   }
-  return { created, failed, skipped: templateChannels.length - valid.length };
+
+  for (const source of valid.filter(c => c.type === ChannelType.GuildCategory)) {
+    try { await createOne(source); } catch { failed++; }
+  }
+  for (const source of valid.filter(c => c.type !== ChannelType.GuildCategory)) {
+    try { await createOne(source); } catch { failed++; }
+  }
+
+  // Restore channel ordering after creation, without touching existing channels.
+  try {
+    const positions = valid
+      .filter(c => channelIds.has(c.id))
+      .map(c => ({ channel: channelIds.get(c.id), position: c.position ?? 0 }));
+    if (positions.length) await guild.channels.setPositions(positions);
+  } catch { /* Position limits or permission issues do not invalidate created channels. */ }
+
+  // Apply supported guild-level settings. Role definitions and role assignments are never copied.
+  const settings = {};
+  const settingMap = {
+    verification_level: "verificationLevel",
+    default_message_notifications: "defaultMessageNotifications",
+    explicit_content_filter: "explicitContentFilter",
+    preferred_locale: "preferredLocale",
+    afk_timeout: "afkTimeout",
+    description: "description",
+    system_channel_flags: "systemChannelFlags"
+  };
+  for (const [sourceKey, targetKey] of Object.entries(settingMap)) {
+    if (templateSource[sourceKey] !== undefined && templateSource[sourceKey] !== null) {
+      settings[targetKey] = templateSource[sourceKey];
+    }
+  }
+  const mappedChannels = [
+    ["afk_channel_id", "afkChannel"],
+    ["system_channel_id", "systemChannel"],
+    ["rules_channel_id", "rulesChannel"],
+    ["public_updates_channel_id", "publicUpdatesChannel"]
+  ];
+  for (const [sourceKey, targetKey] of mappedChannels) {
+    const mapped = channelIds.get(templateSource[sourceKey]);
+    if (mapped) settings[targetKey] = mapped;
+  }
+  let settingsApplied = false;
+  if (Object.keys(settings).length) {
+    try { await guild.edit(settings, "Apply approved template settings without copying roles"); settingsApplied = true; }
+    catch { settingsApplied = false; }
+  }
+  return {
+    created,
+    failed,
+    skipped: templateChannels.length - valid.length,
+    settingsApplied,
+    overwritesCopied: true
+  };
 }
 
 const commands = [
@@ -163,9 +238,9 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ content: "Template cancelled. No channels were created.", embeds: [], components: [] });
     }
     await interaction.update({ content: "Applying the approved channel layout…", embeds: [], components: [] });
-    const result = await applyTemplate(interaction.guild, pending.channels);
+    const result = await applyTemplate(interaction.guild, pending.source);
     await interaction.editReply({
-      content: `Template finished. Created **${result.created}** channels/categories. Failed: **${result.failed}**. Unsupported types skipped: **${result.skipped}**. Existing channels were not changed or deleted.`
+      content: `Template finished. Created **${result.created}** channels/categories. Failed: **${result.failed}**. Unsupported types skipped: **${result.skipped}**. Server settings: **${result.settingsApplied ? "applied" : "not applied or none available"}**. Role definitions were not copied. Existing channels were not changed or deleted.`
     });
     await log(interaction.guild, `Template layout applied by <@${ownerId}>. Created ${result.created}; failed ${result.failed}; skipped ${result.skipped}.`);
     return;
@@ -229,11 +304,11 @@ client.on("interactionCreate", async interaction => {
       .addFields(
         { name: "Categories", value: String(categories.length), inline: true },
         { name: "Other channels", value: String(others.length), inline: true },
-        { name: "Total to create", value: String(supported.length), inline: true }
+        { name: "Total to create", value: String(supported.length), inline: true },\n        { name: "Role copying", value: "Disabled", inline: true },\n        { name: "Server settings", value: "Included where supported", inline: true },\n        { name: "Permission overwrites", value: "Compatible @everyone and existing-member rules", inline: true }
       )
-      .setFooter({ text: "Only channel layout is copied. Roles, permissions and existing channels are not changed." });
+      .setFooter({ text: "Copies supported server settings, channel layout and compatible channel permissions. Roles are never copied; existing channels are not deleted." });
     client.templatePreviews ||= new Map();
-    client.templatePreviews.set(interaction.user.id, { channels });
+    client.templatePreviews.set(interaction.user.id, { source });
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`template:confirm:${interaction.user.id}`).setLabel("Create channels").setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId(`template:cancel:${interaction.user.id}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary)
