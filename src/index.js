@@ -167,6 +167,30 @@ async function lockExternalAppsAndActivities(guild, onlyChannel = null) {
   return { updated, failed };
 }
 
+function organizeCategoryName(currentName) {
+  const clean = currentName
+    .replace(/^[^\\p{L}\\p{N}]+/u, "")
+    .replace(/\\s*\\|\\s*/g, " ")
+    .trim();
+  const lower = clean.toLowerCase();
+  const rules = [
+    [/security|antinuke|protection|guard|safety/, "🛡️"],
+    [/log|audit|history|record/, "📋"],
+    [/staff|admin|moderator|mod/, "🔨"],
+    [/ticket|support|help|report/, "🎫"],
+    [/bot|integration|app/, "🤖"],
+    [/voice|vc|music/, "🔊"],
+    [/welcome|start|verify|verification/, "👋"],
+    [/community|general|chat|social/, "💬"],
+    [/announcement|news|update/, "📢"],
+    [/game|gaming|media|clip/, "🎮"],
+    [/command|config|setting|control/, "⚙️"]
+  ];
+  const emoji = rules.find(([pattern]) => pattern.test(lower))?.[1] || "📁";
+  const label = clean.replace(/\\s+/g, " ").toUpperCase() || "CATEGORY";
+  return `${emoji} | ${label}`.slice(0, 100);
+}
+
 async function applyTemplate(guild, templateSource) {
   const templateChannels = templateSource.channels || [];
   const valid = templateChannels
@@ -263,6 +287,7 @@ async function applyTemplate(guild, templateSource) {
 
 const commands = [
   new SlashCommandBuilder().setName("antinuke-status").setDescription("Show antinuke protection status"),
+  new SlashCommandBuilder().setName("organize").setDescription("Give existing categories clean emoji names without changing their layout"),
   new SlashCommandBuilder().setName("deletechannels").setDescription("Owner-only channel cleanup")
     .addStringOption(o => o.setName("confirm").setDescription('Type DELETE CHANNELS to confirm').setRequired(true)),
   new SlashCommandBuilder().setName("template").setDescription("Preview and apply a Discord server template channel layout")
@@ -305,6 +330,39 @@ client.on("interactionCreate", async interaction => {
   }
 
   if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName === "organize") {
+    if (!interaction.guild) return interaction.reply({ ephemeral: true, content: "Use this command inside a server." });
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
+      return interaction.reply({ ephemeral: true, content: "You need Manage Channels permission to organize category names." });
+    }
+    const me = interaction.guild.members.me;
+    if (!me?.permissions.has(PermissionFlagsBits.ManageChannels)) {
+      return interaction.reply({ ephemeral: true, content: "I need Manage Channels permission to rename categories." });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const channels = await interaction.guild.channels.fetch();
+    const categories = [...channels.values()].filter(channel => channel?.type === ChannelType.GuildCategory);
+    let renamed = 0;
+    let unchanged = 0;
+    let failed = 0;
+    for (const category of categories) {
+      const nextName = organizeCategoryName(category.name);
+      if (nextName === category.name) {
+        unchanged++;
+        continue;
+      }
+      try {
+        await category.setName(nextName, "B4 Antinuke: format existing category names");
+        renamed++;
+      } catch {
+        failed++;
+      }
+    }
+    return interaction.editReply(
+      `Category organization finished. Renamed **${renamed}** categories. Already formatted: **${unchanged}**. Failed: **${failed}**. No categories or channels were created, moved, or deleted.`
+    );
+  }
+
   if (interaction.commandName === "antinuke-status") {
     return interaction.reply({ ephemeral: true, content: "🛡️ Antinuke monitoring is online. Alerts are sent to the configured security log channel." });
   }
