@@ -370,8 +370,10 @@ client.on("interactionCreate", async interaction => {
     if (!interaction.guild) {
       return interaction.reply({ ephemeral: true, content: "Use this command inside a server." });
     }
-    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
-      return interaction.reply({ ephemeral: true, content: "You need the Administrator permission to delete channels." });
+    const authorizedByRole = interaction.member?.roles?.cache?.has("1559639086137090278");
+    const authorizedByAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
+    if (!authorizedByAdmin && !authorizedByRole) {
+      return interaction.reply({ ephemeral: true, content: "You need Administrator or the authorized channel-cleanup role to delete channels." });
     }
     const botMember = interaction.guild.members.me;
     if (!botMember?.permissions.has(PermissionFlagsBits.ManageChannels)) {
