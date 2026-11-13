@@ -14,5 +14,5 @@ Deploy on Railway with start command `npm start`. Add the environment variables 
 - This is a starter implementation, not a guarantee against every raid or exploit. Test in a private server first.
 - Discord audit-log events can arrive late; a bot cannot undo all damage after the fact.
 - Keep the bot token secret and never commit it.
-- `/deletechannels` is disabled by default. If enabled, it is restricted to the server owner and requires the exact confirmation phrase. It excludes the configured log channel.
+- `/deletechannels` is available to members with the Discord **Administrator** permission. The bot also needs **Manage Channels**. The command requires the exact confirmation phrase `DELETE CHANNELS` before deleting channels, and it excludes the configured log channel.
 - Give the bot only the permissions it needs. The bot cannot protect against actions by the server owner.
