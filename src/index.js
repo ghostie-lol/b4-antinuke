@@ -367,11 +367,15 @@ client.on("interactionCreate", async interaction => {
     return interaction.reply({ ephemeral: true, content: "🛡️ Antinuke monitoring is online. Alerts are sent to the configured security log channel." });
   }
   if (interaction.commandName === "deletechannels") {
-    if (interaction.user.id !== interaction.guild.ownerId) {
-      return interaction.reply({ ephemeral: true, content: "Only the server owner can use this command." });
+    if (!interaction.guild) {
+      return interaction.reply({ ephemeral: true, content: "Use this command inside a server." });
     }
-    if (process.env.ENABLE_CHANNEL_CLEANUP !== "true") {
-      return interaction.reply({ ephemeral: true, content: "Channel cleanup is disabled. Set ENABLE_CHANNEL_CLEANUP=true to enable it." });
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+      return interaction.reply({ ephemeral: true, content: "You need the Administrator permission to delete channels." });
+    }
+    const botMember = interaction.guild.members.me;
+    if (!botMember?.permissions.has(PermissionFlagsBits.ManageChannels)) {
+      return interaction.reply({ ephemeral: true, content: "I need Manage Channels permission to delete channels." });
     }
     if (interaction.options.getString("confirm") !== "DELETE CHANNELS") {
       return interaction.reply({ ephemeral: true, content: 'Confirmation did not match. Type exactly: DELETE CHANNELS' });
@@ -379,9 +383,18 @@ client.on("interactionCreate", async interaction => {
     await interaction.reply({ ephemeral: true, content: "Cleanup started. Deleting channels except the security log channel…" });
     const guild = interaction.guild;
     const channels = [...guild.channels.cache.values()].filter(c => c.id !== process.env.LOG_CHANNEL_ID);
-    for (const channel of channels) await channel.delete("Owner-confirmed channel cleanup").catch(() => {});
-    await log(guild, `Owner <@${interaction.user.id}> ran channel cleanup. Attempted ${channels.length} deletions.`);
-    return;
+    let deleted = 0;
+    let failed = 0;
+    for (const channel of channels) {
+      try {
+        await channel.delete("Administrator-authorized channel cleanup");
+        deleted++;
+      } catch {
+        failed++;
+      }
+    }
+    await log(guild, `Channel cleanup by administrator <@${interaction.user.id}>. Deleted: ${deleted}; failed: ${failed}.`);
+    return interaction.followUp({ ephemeral: true, content: `Channel cleanup finished. Deleted: **${deleted}**. Failed: **${failed}**. The configured security log channel was excluded.` });
   }
 
   if (interaction.commandName === "template") {
